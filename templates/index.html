@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fuel Optimization Engine</title>
+    
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Leaflet CSS & JS for Mapping -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        #map { height: 100vh; }
+    </style>
+</head>
+<body class="bg-gray-100 flex">
+
+    <!-- Sidebar -->
+    <div class="w-1/3 min-w-[350px] max-w-[450px] bg-white h-screen shadow-lg p-6 flex flex-col z-10 relative overflow-y-auto">
+        <h1 class="text-2xl font-bold text-gray-800 mb-6">Fuel Optimization Engine</h1>
+        
+        <div class="space-y-4 mb-6">
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Start Location</label>
+                <input type="text" id="start-location" placeholder="e.g. Tulsa, OK" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm border p-2 focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Destination</label>
+                <input type="text" id="end-location" placeholder="e.g. Dallas, TX" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm border p-2 focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <button id="calc-btn" onclick="calculateRoute()" class="w-full bg-blue-600 text-white font-bold py-2 px-4 rounded hover:bg-blue-700 transition">
+                Calculate Optimal Route
+            </button>
+        </div>
+
+        <!-- Loading State -->
+        <div id="loading" class="hidden text-center text-blue-600 font-semibold mb-4">
+            Calculating optimal fuel stops...
+        </div>
+
+        <!-- Error State -->
+        <div id="error-box" class="hidden bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-4" role="alert">
+            <p id="error-msg"></p>
+        </div>
+
+        <!-- Results Summary -->
+        <div id="results-panel" class="hidden bg-gray-50 p-4 rounded-lg border border-gray-200">
+            <h2 class="text-lg font-bold text-gray-800 border-b pb-2 mb-2">Trip Summary</h2>
+            <div class="flex justify-between mb-2">
+                <span class="text-gray-600">Total Distance:</span>
+                <span id="res-distance" class="font-semibold text-gray-900">0 miles</span>
+            </div>
+            <div class="flex justify-between mb-4">
+                <span class="text-gray-600">Total Fuel Cost:</span>
+                <span id="res-cost" class="font-bold text-green-600">$0.00</span>
+            </div>
+            
+            <h3 class="font-semibold text-gray-700 mb-2">Fuel Stops (<span id="res-stops-count">0</span>)</h3>
+            <ul id="stops-list" class="space-y-2 text-sm">
+                <!-- Stops injected via JS -->
+            </ul>
+        </div>
+    </div>
+
+    <!-- Map Canvas -->
+    <div class="flex-grow relative">
+        <div id="map"></div>
+    </div>
+
+    <script>
+        // Initialize Leaflet Map
+        const map = L.map('map').setView([39.8283, -98.5795], 4); // Center of US
+        
+        // Use Esri WorldStreetMap (100% free, no API key required, very reliable)
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom, 2012'
+        }).addTo(map);
+
+        let currentRouteLayer = null;
+        let markers = [];
+
+        async function geocode(location) {
+            const response = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&format=json`);
+            const data = await response.json();
+            if (data.results && data.results.length > 0) {
+                return {
+                    lat: data.results[0].latitude,
+                    lon: data.results[0].longitude
+                };
+            }
+            throw new Error(`Could not find coordinates for ${location}`);
+        }
+
+        async function calculateRoute() {
+            const startLoc = document.getElementById('start-location').value;
+            const endLoc = document.getElementById('end-location').value;
+            const errorBox = document.getElementById('error-box');
+            const errorMsg = document.getElementById('error-msg');
+            const loading = document.getElementById('loading');
+            const resultsPanel = document.getElementById('results-panel');
+
+            // Reset UI
+            errorBox.classList.add('hidden');
+            resultsPanel.classList.add('hidden');
+            loading.classList.remove('hidden');
+            document.getElementById('calc-btn').disabled = true;
+
+            // Clear previous map layers
+            if (currentRouteLayer) map.removeLayer(currentRouteLayer);
+            markers.forEach(m => map.removeLayer(m));
+            markers = [];
+
+            try {
+                if (!startLoc || !endLoc) throw new Error("Please enter both start and end locations.");
+
+                // 1. Geocode locations
+                const startCoords = await geocode(startLoc);
+                const endCoords = await geocode(endLoc);
+
+                // 2. Call our Django API
+                const response = await fetch('/api/optimize-route/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        start_lon: startCoords.lon,
+                        start_lat: startCoords.lat,
+                        end_lon: endCoords.lon,
+                        end_lat: endCoords.lat
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || "An error occurred calculating the route.");
+                }
+
+                // 3. Update UI with Results
+                document.getElementById('res-distance').innerText = `${data.total_distance_miles} miles`;
+                document.getElementById('res-cost').innerText = `$${data.total_cost}`;
+                document.getElementById('res-stops-count').innerText = data.fuel_stops.length;
+                
+                const stopsList = document.getElementById('stops-list');
+                stopsList.innerHTML = '';
+                
+                data.fuel_stops.forEach((stop, index) => {
+                    const li = document.createElement('li');
+                    li.className = "bg-white p-2 rounded border border-gray-200 shadow-sm";
+                    li.innerHTML = `
+                        <div class="font-bold text-gray-800">Stop ${index + 1}: ${stop.name}</div>
+                        <div class="text-gray-500">${stop.city}, ${stop.state}</div>
+                        <div class="flex justify-between mt-1 text-blue-600 font-semibold">
+                            <span>${stop.gallons_bought} gal @ $${stop.price}</span>
+                            <span>$${stop.cost}</span>
+                        </div>
+                    `;
+                    stopsList.appendChild(li);
+
+                    // Drop map marker
+                    if (stop.latitude && stop.longitude) {
+                        const marker = L.marker([stop.latitude, stop.longitude]).addTo(map);
+                        marker.bindPopup(`<b>${stop.name}</b><br/>${stop.gallons_bought} gal @ $${stop.price}`);
+                        markers.push(marker);
+                    }
+                });
+
+                // 4. Draw Route on Map
+                // GeoJSON coordinates are [lon, lat], Leaflet needs [lat, lon]
+                const latLngs = data.route_geometry.coordinates.map(c => [c[1], c[0]]);
+                currentRouteLayer = L.polyline(latLngs, {color: 'blue', weight: 5, opacity: 0.7}).addTo(map);
+                map.fitBounds(currentRouteLayer.getBounds());
+
+                resultsPanel.classList.remove('hidden');
+
+            } catch (err) {
+                errorMsg.innerText = err.message;
+                errorBox.classList.remove('hidden');
+            } finally {
+                loading.classList.add('hidden');
+                document.getElementById('calc-btn').disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>

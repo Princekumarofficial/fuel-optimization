@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    # Use python's auto-reloading dev server
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      # Mount the local directory to /app in the container for live code reloading
+      - .:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=1
+      # Point Django's cache to the Redis container
+      - REDIS_URL=redis://redis:6379/1
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    # Simple dev configuration for Redis
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
